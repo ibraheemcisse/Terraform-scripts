@@ -1,0 +1,173 @@
+#!/bin/bash
+
+# Define base directories
+BASE_DIR="eks-terraform"
+MODULES=("vpc" "eks")
+FILES_ROOT=("provider.tf" "main.tf" "variables.tf" "terraform.tfvars")
+K8S_FILES=("k8s-deployment.yaml" "k8s-service.yaml")
+
+# Create project structure
+mkdir -p $BASE_DIR/modules/{vpc,eks}
+
+# Create module files
+for MODULE in "${MODULES[@]}"; do
+    touch $BASE_DIR/modules/$MODULE/{main.tf,variables.tf,outputs.tf}
+done
+
+# Create root Terraform files
+for FILE in "${FILES_ROOT[@]}"; do
+    touch $BASE_DIR/$FILE
+done
+
+# Create Kubernetes manifests
+for FILE in "${K8S_FILES[@]}"; do
+    touch $BASE_DIR/$FILE
+done
+
+# Populate provider.tf
+cat <<EOF > $BASE_DIR/provider.tf
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-west-1"
+}
+EOF
+
+# Populate VPC module files
+cat <<EOF > $BASE_DIR/modules/vpc/main.tf
+resource "aws_vpc" "main" {
+  cidr_block = var.vpc_cidr
+}
+
+resource "aws_subnet" "public" {
+  count = 2
+  vpc_id = aws_vpc.main.id
+  cidr_block = "10.0.\${count.index}.0/24"
+  availability_zone = var.availability_zones[count.index]
+}
+EOF
+
+cat <<EOF > $BASE_DIR/modules/vpc/variables.tf
+variable "vpc_cidr" {
+  default = "10.0.0.0/16"
+}
+
+variable "availability_zones" {
+  type    = list(string)
+  default = ["us-west-1a", "us-west-1b"]
+}
+EOF
+
+cat <<EOF > $BASE_DIR/modules/vpc/outputs.tf
+output "vpc_id" {
+  value = aws_vpc.main.id
+}
+
+output "subnet_ids" {
+  value = aws_subnet.public[*].id
+}
+EOF
+
+# Populate EKS module files
+cat <<EOF > $BASE_DIR/modules/eks/main.tf
+resource "aws_eks_cluster" "eks" {
+  name     = var.cluster_name
+  role_arn = aws_iam_role.eks_role.arn
+
+  vpc_config {
+    subnet_ids = var.subnet_ids
+  }
+}
+
+resource "aws_iam_role" "eks_role" {
+  name = "eks-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "eks.amazonaws.com" }
+    }]
+  })
+}
+EOF
+
+cat <<EOF > $BASE_DIR/modules/eks/variables.tf
+variable "cluster_name" {
+  default = "eks-simple-cluster"
+}
+
+variable "subnet_ids" {
+  type = list(string)
+}
+EOF
+
+cat <<EOF > $BASE_DIR/modules/eks/outputs.tf
+output "eks_cluster_id" {
+  value = aws_eks_cluster.eks.id
+}
+EOF
+
+# Populate main.tf
+cat <<EOF > $BASE_DIR/main.tf
+module "vpc" {
+  source         = "./modules/vpc"
+  vpc_cidr      = "10.0.0.0/16"
+}
+
+module "eks" {
+  source       = "./modules/eks"
+  cluster_name = "eks-simple-cluster"
+  subnet_ids   = module.vpc.subnet_ids
+}
+EOF
+
+# Populate Kubernetes deployment manifest
+cat <<EOF > $BASE_DIR/k8s-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-python-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: simple-python
+  template:
+    metadata:
+      labels:
+        app: simple-python
+    spec:
+      containers:
+      - name: python-app
+        image: python:3.8
+        command: ["python", "-m", "http.server", "8080"]
+        ports:
+        - containerPort: 8080
+EOF
+
+# Populate Kubernetes service manifest
+cat <<EOF > $BASE_DIR/k8s-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: simple-python-service
+spec:
+  selector:
+    app: simple-python
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: LoadBalancer
+EOF
+
+echo "✅ Terraform EKS project structure created successfully!"
